@@ -38,6 +38,21 @@ PostgreSQLContainer { databaseName = "app" }.use { pg ->
 
 Without `DOCKER_HOST`, Windows uses `\\.\pipe\docker_engine`; elsewhere well-known sockets are probed (Docker Desktop, rootless, Colima, OrbStack, Rancher, Podman).
 
+## Publishing
+Maven coordinates live in `gradle.properties` (`buildInfo.*`), the plugin version in `gradle/libs.versions.toml`.
+Modules are published with [vanniktech/gradle-maven-publish-plugin](https://github.com/vanniktech/gradle-maven-publish-plugin):
+
+```bash
+./gradlew publishToMavenLocal
+```
+
+```bash
+./gradlew publishAndReleaseToMavenCentral
+```
+
+Maven Central credentials and the signing key are read from `~/.gradle/gradle.properties` and are never stored in
+this repository. Publish from macOS: the Apple targets cannot be built elsewhere.
+
 ## Not supported yet
 TLS for `tcp://`, registry auth, Windows containers (Linux containers via Docker Desktop only), Docker Compose, JS/Wasm targets.
 

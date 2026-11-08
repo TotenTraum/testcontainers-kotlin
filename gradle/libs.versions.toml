@@ -4,6 +4,7 @@ coroutines = "1.11.0"
 serialization = "1.10.0"
 ktor = "3.6.1"
 kotlinx-io = "0.9.1"
+publishPluginVersion = "0.37.0"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -15,3 +16,4 @@ ktor-network = { module = "io.ktor:ktor-network", version.ref = "ktor" }
 [plugins]
 kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+publishPlugin = { id = "com.vanniktech.maven.publish", version.ref = "publishPluginVersion" }

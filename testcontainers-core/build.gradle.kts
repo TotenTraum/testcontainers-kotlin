@@ -1,7 +1,10 @@
 plugins {
     alias(libs.plugins.kotlin.multiplatform)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.publishPlugin)
 }
+
+description = "Testcontainers for Kotlin Multiplatform: Docker containers in tests on JVM, macOS, Linux and Windows"
 
 kotlin {
     explicitApi()
