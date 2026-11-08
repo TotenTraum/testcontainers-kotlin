@@ -1,0 +1,100 @@
+# Each runner covers what its Docker setup allows:
+#   linux   — Docker with Linux containers: the full suite on JVM and linuxX64.
+#   macos   — no Docker on hosted macOS runners: Apple targets are built, only tests without containers run.
+#   windows — Docker in Windows-containers mode: named-pipe transport, the nanoserver test (mingwX64)
+#             and the JVM named-pipe client; Linux-container tests skip themselves on that daemon.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v5
+      - uses: actions/cache@v5
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+      - name: Test
+        run: >
+          ./gradlew --continue
+          :testcontainers-core:jvmTest
+          :testcontainers-core:linuxX64Test
+          :testcontainers-core:compileKotlinLinuxArm64
+      - name: Leftover containers (Ryuk should have removed them)
+        if: always()
+        run: docker ps -a --filter label=org.testcontainers.sessionId
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: reports-linux
+          path: "**/build/reports/"
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v5
+      - uses: actions/cache@v5
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+      - name: Test without Docker
+        run: >
+          ./gradlew --continue
+          :testcontainers-core:macosArm64Test --tests "*UnitTests"
+          :testcontainers-core:compileKotlinMacosX64
+          :testcontainers-core:publishToMavenLocal
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: reports-macos
+          path: "**/build/reports/"
+
+  windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v5
+      - uses: actions/cache@v5
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+      - name: Docker info
+        run: docker version
+      - name: Test
+        env:
+          TC_WINDOWS_TEST_IMAGE: mcr.microsoft.com/windows/nanoserver:ltsc2025
+        run: >
+          ./gradlew --continue
+          :testcontainers-core:mingwX64Test
+          :testcontainers-core:jvmTest
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: reports-windows
+          path: "**/build/reports/"
