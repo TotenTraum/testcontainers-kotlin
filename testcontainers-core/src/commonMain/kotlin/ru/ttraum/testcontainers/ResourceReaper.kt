@@ -31,7 +31,7 @@ import kotlin.time.Duration.Companion.seconds
 internal object ResourceReaper {
     private const val RYUK_PORT = 8080
     private val image: String
-        get() = getEnv("TESTCONTAINERS_RYUK_CONTAINER_IMAGE") ?: "testcontainers/ryuk:0.14.0"
+        get() = Docker.imageNameSubstitutor.substitute(TestcontainersConfig.get("ryuk.container.image") ?: "testcontainers/ryuk:0.14.0")
 
     private val mutex = Mutex()
     private var started = false
@@ -42,7 +42,7 @@ internal object ResourceReaper {
     private var write: ByteWriteChannel? = null
 
     val disabled: Boolean
-        get() = getEnv("TESTCONTAINERS_RYUK_DISABLED")?.lowercase() in setOf("true", "1", "yes")
+        get() = TestcontainersConfig.getBoolean("ryuk.disabled")
 
     suspend fun ensureStarted() {
         if (disabled) return
@@ -68,7 +68,7 @@ internal object ResourceReaper {
                     portBindings = mapOf(port to listOf(PortBinding(hostPort = ""))),
                     binds = listOf("${Docker.endpoint.socketPathForMount()}:/var/run/docker.sock"),
                     autoRemove = true,
-                    privileged = getEnv("TESTCONTAINERS_RYUK_PRIVILEGED")?.lowercase() == "true",
+                    privileged = TestcontainersConfig.getBoolean("ryuk.container.privileged"),
                 ),
             ),
             name = "testcontainers-ryuk-${Docker.sessionId}",

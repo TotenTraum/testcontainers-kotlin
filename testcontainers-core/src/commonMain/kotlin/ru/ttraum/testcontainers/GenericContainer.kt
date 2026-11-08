@@ -9,6 +9,8 @@ import ru.ttraum.testcontainers.internal.PortBinding
 import ru.ttraum.testcontainers.internal.TarEntry
 import ru.ttraum.testcontainers.internal.buildTar
 import ru.ttraum.testcontainers.internal.readTar
+import ru.ttraum.testcontainers.images.ImageFromDockerfile
+import ru.ttraum.testcontainers.images.PullPolicy
 import ru.ttraum.testcontainers.wait.Wait
 import ru.ttraum.testcontainers.wait.WaitStrategy
 import kotlinx.coroutines.NonCancellable
@@ -50,6 +52,15 @@ public open class GenericContainer(
 ) {
     public constructor(image: String) : this(image, {})
 
+    /** A container from an image built from a Dockerfile; the build runs on [start]. */
+    public constructor(image: ImageFromDockerfile, configure: GenericContainer.() -> Unit = {}) : this(image.imageName, configure) {
+        imageBuilder = image
+    }
+
+    /** The image actually run, after [Docker.imageNameSubstitutor]; known once started. */
+    public var resolvedImage: String? = null
+        private set
+
     private val exposedPorts = linkedSetOf<Int>()
     private val fixedPorts = linkedMapOf<Int, Int>()
     private val env = linkedMapOf<String, String>()
@@ -66,7 +77,8 @@ public open class GenericContainer(
     private var privileged: Boolean = false
     private var network: Network? = null
     private var name: String? = null
-    private var alwaysPull: Boolean = false
+    private var pullPolicy: PullPolicy = PullPolicy.defaultPolicy()
+    private var imageBuilder: ImageFromDockerfile? = null
     private var waitStrategy: WaitStrategy? = null
     private var startupTimeout: Duration = 60.seconds
 
@@ -100,7 +112,10 @@ public open class GenericContainer(
     public fun withHostname(hostname: String): GenericContainer = apply { this.hostname = hostname }
     public fun withPrivilegedMode(enabled: Boolean = true): GenericContainer = apply { privileged = enabled }
     public fun withName(name: String): GenericContainer = apply { this.name = name }
-    public fun withAlwaysPull(enabled: Boolean = true): GenericContainer = apply { alwaysPull = enabled }
+    public fun withAlwaysPull(enabled: Boolean = true): GenericContainer =
+        withImagePullPolicy(if (enabled) PullPolicy.alwaysPull() else PullPolicy.defaultPolicy())
+
+    public fun withImagePullPolicy(policy: PullPolicy): GenericContainer = apply { pullPolicy = policy }
     public fun withNetwork(network: Network): GenericContainer = apply { this.network = network }
     public fun withNetworkAliases(vararg aliases: String): GenericContainer = apply { networkAliases += aliases }
     public fun withTmpFs(path: String, options: String = "rw"): GenericContainer = apply { tmpfs[path] = options }
@@ -149,12 +164,15 @@ public open class GenericContainer(
         beforeStart()
         val client = Docker.client
         ResourceReaper.ensureStarted()
-        Docker.ensureImage(image, alwaysPull)
+        val runImage = imageBuilder?.let { it.build(); image } ?: Docker.imageNameSubstitutor.substitute(image).also {
+            Docker.ensureImage(it, pullPolicy)
+        }
+        resolvedImage = runImage
 
         val ports = exposedPorts.map { "$it/tcp" }
         val networkName = network?.let { it.ensureCreated(); it.name }
         val request = ContainerCreateRequest(
-            image = image,
+            image = runImage,
             cmd = command,
             entrypoint = entrypoint,
             env = env.map { (k, v) -> "$k=$v" }.ifEmpty { null },
@@ -165,7 +183,9 @@ public open class GenericContainer(
             hostname = hostname,
             hostConfig = HostConfig(
                 portBindings = exposedPorts.associate {
-                    "$it/tcp" to listOf(PortBinding(hostPort = fixedPorts[it]?.toString() ?: ""))
+                    // "0" (like `docker run -p 0:5000`), not "": Docker Desktop then also publishes the port inside its
+                    // VM, so the daemon itself can reach it (e.g. pushing to a registry started by the test).
+                    "$it/tcp" to listOf(PortBinding(hostPort = fixedPorts[it]?.toString() ?: "0"))
                 }.ifEmpty { null },
                 binds = binds.ifEmpty { null },
                 privileged = privileged.takeIf { it },

@@ -119,3 +119,13 @@ internal class VersionResponse(
     @SerialName("Os") val os: String = "linux",
     @SerialName("Version") val version: String? = null,
 )
+
+@Serializable
+internal class ImageInspect(
+    @SerialName("Id") val id: String,
+    @SerialName("Created") val created: String? = null,
+    @SerialName("Metadata") val metadata: ImageMetadata? = null,
+)
+
+@Serializable
+internal class ImageMetadata(@SerialName("LastTagTime") val lastTagTime: String? = null)

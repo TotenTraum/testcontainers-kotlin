@@ -28,20 +28,35 @@ PostgreSQLContainer { databaseName = "app" }.use { pg ->
 - Wait strategies: `forListeningPort` (host side + `/proc/net/tcp` inside the container),
   `forLogMessage`, `forHttp`, `forHealthcheck`, `allOf`. Startup fails fast if the container exits;
   a timeout says what it waited for and the last reason it was not ready, followed by the container logs.
-- Automatic image pull.
+- Images: pull policies (`defaultPolicy`, `alwaysPull`, `ageBased`) with retries of transient failures,
+  registry credentials from the docker CLI config (`auths`, `credHelpers`, `credsStore`, `DOCKER_AUTH_CONFIG`),
+  name substitution for registry mirrors (`hub.image.name.prefix`), images built from a Dockerfile (`ImageFromDockerfile`).
 - Cleanup through Ryuk (`testcontainers/ryuk`), on JVM and Native alike.
 - Modules: `PostgreSQLContainer`, `RedisContainer`.
 
-## Configuration (env)
-| Variable | Purpose |
-|---|---|
-| `DOCKER_HOST` | `unix:///...`, `npipe:////./pipe/docker_engine` or `tcp://host:port` (no TLS) |
-| `TESTCONTAINERS_RYUK_DISABLED` | turn off Ryuk |
-| `TESTCONTAINERS_RYUK_CONTAINER_IMAGE` | Ryuk image |
-| `TESTCONTAINERS_HOST_OVERRIDE` | host for mapped ports |
-| `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` | socket path to mount into Ryuk |
+## Configuration
+Settings are read like in testcontainers-java: the environment variable `TESTCONTAINERS_<KEY>`
+(`ryuk.disabled` → `TESTCONTAINERS_RYUK_DISABLED`), then `~/.testcontainers.properties`.
+`TestcontainersConfig.set(key, value)` overrides both from code.
 
-Without `DOCKER_HOST`, Windows uses `\\.\pipe\docker_engine`; elsewhere well-known sockets are probed (Docker Desktop, rootless, Colima, OrbStack, Rancher, Podman).
+| Key | Purpose |
+|---|---|
+| `tc.host` (or `TC_HOST`) | Testcontainers Desktop / Cloud endpoint, used first |
+| `docker.host` | daemon, after `DOCKER_HOST` |
+| `hub.image.name.prefix` | registry mirror for Docker Hub images, e.g. `registry.corp/mirror/` |
+| `pull.retries` | retries of transient pull failures (default 2) |
+| `ryuk.disabled`, `ryuk.container.image`, `ryuk.container.privileged` | resource reaper |
+| `host.override` | host for mapped ports |
+| `docker.socket.override` | socket path to mount into Ryuk |
+
+The daemon is found in this order: `tc.host`, `DOCKER_HOST`, `docker.host`, the docker CLI context
+(`DOCKER_CONTEXT`, else `currentContext` in `~/.docker/config.json`; `DOCKER_CONFIG` moves that directory),
+then on Windows `\\.\pipe\docker_engine`, elsewhere well-known sockets (Docker Desktop, rootless, Colima,
+OrbStack, Rancher, Podman). `Docker.resolvedEndpoint.source` says which one was used.
+
+Registry credentials come from `DOCKER_AUTH_CONFIG` (the JSON of a `config.json`) or `~/.docker/config.json`;
+helpers are the `docker-credential-<name>` programs on `PATH`. `Docker.registryCredentials` and
+`Docker.imageNameSubstitutor` replace either from code.
 
 ## Publishing
 Maven coordinates live in `gradle.properties` (`buildInfo.*`), the plugin version in `gradle/libs.versions.toml`.
@@ -59,7 +74,7 @@ Maven Central credentials and the signing key are read from `~/.gradle/gradle.pr
 this repository. Publish from macOS: the Apple targets cannot be built elsewhere.
 
 ## Not supported yet
-TLS for `tcp://`, registry auth, Windows containers (Linux containers via Docker Desktop only), Docker Compose, JS/Wasm targets.
+TLS for `tcp://` (detected and reported, not supported), `.dockerignore` in builds, Windows containers (Linux containers via Docker Desktop only), Docker Compose, JS/Wasm targets.
 
 ```bash
 ./gradlew :testcontainers-core:jvmTest :testcontainers-core:macosArm64Test

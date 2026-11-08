@@ -20,6 +20,8 @@ kotlin {
     sourceSets {
         all {
             languageSettings.optIn("kotlin.uuid.ExperimentalUuidApi")
+            languageSettings.optIn("kotlin.time.ExperimentalTime")
+            languageSettings.optIn("kotlin.io.encoding.ExperimentalEncodingApi")
         }
         commonMain.dependencies {
             api(libs.kotlinx.coroutines.core)

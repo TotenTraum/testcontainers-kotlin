@@ -54,16 +54,60 @@ internal class DockerClient(val endpoint: DockerEndpoint) {
     /** Daemon OS: `linux` or `windows` (Windows containers mode). */
     suspend fun serverOs(): String = callJson<VersionResponse>("GET", "/version").os
 
-    suspend fun imageExists(image: String): Boolean =
-        call("GET", "/images/$image/json", allow = setOf(404)).status != 404
+    suspend fun imageExists(image: String): Boolean = inspectImage(image) != null
 
-    suspend fun pullImage(image: String) {
+    suspend fun inspectImage(image: String): ImageInspect? {
+        val response = call("GET", "/images/$image/json", allow = setOf(404))
+        return if (response.status == 404) null else DockerJson.decodeFromString(response.bodyText())
+    }
+
+    suspend fun pullImage(image: String, registryAuth: String? = null) {
         val (repo, tag) = splitImage(image)
-        val response = call("POST", "/images/create?fromImage=${urlEncode(repo)}&tag=${urlEncode(tag)}")
+        val headers = registryAuth?.let { mapOf("X-Registry-Auth" to it) } ?: emptyMap()
+        val response = call("POST", "/images/create?fromImage=${urlEncode(repo)}&tag=${urlEncode(tag)}", headers = headers)
         // The body is a stream of JSON progress objects; errors are reported in-band.
-        response.bodyText().lineSequence().filter { it.isNotBlank() }.forEach { line ->
+        checkStream(response.bodyText()) { "Failed to pull $image: $it" }
+    }
+
+    suspend fun tagImage(source: String, target: String) {
+        val (repo, tag) = splitImage(target)
+        call("POST", "/images/$source/tag?repo=${urlEncode(repo)}&tag=${urlEncode(tag)}")
+    }
+
+    suspend fun pushImage(image: String, registryAuth: String) {
+        val (repo, tag) = splitImage(image)
+        // The daemon requires the header even for registries without authentication.
+        val response = call("POST", "/images/$repo/push?tag=${urlEncode(tag)}", headers = mapOf("X-Registry-Auth" to registryAuth))
+        checkStream(response.bodyText()) { "Failed to push $image: $it" }
+    }
+
+    suspend fun removeImage(image: String) {
+        call("DELETE", "/images/$image?force=true", allow = setOf(404, 409))
+    }
+
+    /** Builds an image from a tar build context; returns the image id. */
+    suspend fun buildImage(context: ByteArray, query: String, registryConfig: String?): String {
+        val headers = registryConfig?.let { mapOf("X-Registry-Config" to it) } ?: emptyMap()
+        val response = call("POST", "/build?$query", context, contentType = "application/x-tar", headers = headers)
+        val text = response.bodyText()
+        val output = StringBuilder()
+        var imageId: String? = null
+        text.lineSequence().filter { it.isNotBlank() }.forEach { line ->
             val obj = runCatching { DockerJson.parseToJsonElement(line) as? JsonObject }.getOrNull() ?: return@forEach
-            obj["error"]?.let { throw DockerException("Failed to pull $image: ${it.jsonPrimitive.content}") }
+            obj["stream"]?.jsonPrimitive?.content?.let { output.append(it) }
+            obj["error"]?.let {
+                throw DockerException("Image build failed: ${it.jsonPrimitive.content}\n--- build output ---\n${output.toString().takeLast(4000)}")
+            }
+            ((obj["aux"] as? JsonObject)?.get("ID"))?.jsonPrimitive?.content?.let { imageId = it }
+        }
+        return imageId ?: throw DockerException("Image build finished without an image id\n--- build output ---\n${output.toString().takeLast(4000)}")
+    }
+
+    /** Throws on the first in-band `error` of a JSON progress stream. */
+    private inline fun checkStream(text: String, message: (String) -> String) {
+        text.lineSequence().filter { it.isNotBlank() }.forEach { line ->
+            val obj = runCatching { DockerJson.parseToJsonElement(line) as? JsonObject }.getOrNull() ?: return@forEach
+            obj["error"]?.let { throw DockerException(message(it.jsonPrimitive.content)) }
         }
     }
 
