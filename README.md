@@ -19,10 +19,15 @@ PostgreSQLContainer { databaseName = "app" }.use { pg ->
 ```
 
 ## Features
-- `GenericContainer`: ports (random/fixed), env, labels, cmd/entrypoint, bind mounts, tmpfs,
-  copying files in (tar via `PUT /archive`), privileged mode, `exec`, logs, networks with aliases.
+- `GenericContainer`: ports (random/fixed), env, labels, cmd/entrypoint, hostname, bind mounts, tmpfs,
+  privileged mode, logs, networks with aliases.
+- Files: copy into a container (before or after start) and out of it (`copyFileFromContainer`,
+  `copyFilesFromContainer`), binary-safe.
+- `execInContainer`: user, env, working directory, stdin (closed afterwards, so the command sees EOF),
+  optional timeout; waits for the real exit code however long the command runs.
 - Wait strategies: `forListeningPort` (host side + `/proc/net/tcp` inside the container),
-  `forLogMessage`, `forHttp`, `forHealthcheck`, `allOf`. Startup fails fast if the container exits.
+  `forLogMessage`, `forHttp`, `forHealthcheck`, `allOf`. Startup fails fast if the container exits;
+  a timeout says what it waited for and the last reason it was not ready, followed by the container logs.
 - Automatic image pull.
 - Cleanup through Ryuk (`testcontainers/ryuk`), on JVM and Native alike.
 - Modules: `PostgreSQLContainer`, `RedisContainer`.

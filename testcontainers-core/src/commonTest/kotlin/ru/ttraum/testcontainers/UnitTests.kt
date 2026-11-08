@@ -2,6 +2,7 @@ package ru.ttraum.testcontainers
 
 import ru.ttraum.testcontainers.internal.DockerClient
 import ru.ttraum.testcontainers.internal.buildTar
+import ru.ttraum.testcontainers.internal.readTar
 import ru.ttraum.testcontainers.internal.TarEntry
 import ru.ttraum.testcontainers.internal.urlEncode
 import kotlin.test.Test
@@ -41,6 +42,16 @@ class UnitTests {
         val tar = buildTar(listOf(TarEntry("/etc/app/config.txt", "abc".encodeToByteArray(), "644".toInt(8))))
         assertEquals(512 + 512 + 1024, tar.size)
         assertEquals("etc/app/config.txt", tar.copyOfRange(0, 18).decodeToString())
+    }
+
+    @Test
+    fun tarRoundTrip() {
+        val long = "a/" + "b".repeat(120) + "/c.txt"
+        val content = ByteArray(1000) { it.toByte() }
+        val entries = readTar(buildTar(listOf(TarEntry("/x.txt", "hi".encodeToByteArray(), 420), TarEntry(long, content, 420))))
+        assertEquals(listOf("x.txt", long), entries.map { it.path })
+        assertEquals("hi", entries[0].content.decodeToString())
+        kotlin.test.assertContentEquals(content, entries[1].content)
     }
 
     @Test

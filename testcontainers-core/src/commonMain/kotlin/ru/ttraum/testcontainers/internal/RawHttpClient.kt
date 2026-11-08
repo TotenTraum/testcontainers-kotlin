@@ -13,6 +13,8 @@ import io.ktor.utils.io.readLine
 import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.io.IOException
 
@@ -77,7 +79,59 @@ internal class RawHttpClient(
         body: ByteArray? = null,
         headers: Map<String, String> = emptyMap(),
     ): HttpResponse = withContext(Dispatchers.IO) {
-        val head = buildString {
+        val head = buildHead(method, path, body, headers)
+        val exchange = Sockets.exchange(target, if (body != null) head + body else head)
+        try {
+            val (status, responseHeaders) = readHead(exchange.input)
+            HttpResponse(status, responseHeaders, readBody(exchange.input, method, status, responseHeaders))
+        } finally {
+            exchange.close()
+        }
+    }
+
+    /**
+     * For hijacked streams that also take input (`exec start` with stdin): sends the request, waits for the
+     * response head, then writes [stdin] and half-closes the connection so the process sees EOF, and reads
+     * the output until the daemon closes the stream.
+     *
+     * The input must not be sent before the response: the daemon drops whatever it buffered while reading the
+     * request. Only sockets can do this (a Windows named pipe has no half-close).
+     */
+    suspend fun executeWithInput(
+        method: String,
+        path: String,
+        body: ByteArray?,
+        headers: Map<String, String>,
+        stdin: ByteArray,
+    ): HttpResponse = withContext(Dispatchers.IO) {
+        require(target !is SocketTarget.NamedPipe) { "Input streams are not supported over named pipes" }
+        val socket = Sockets.connect(target)
+        try {
+            val write = socket.openWriteChannel(autoFlush = false)
+            val read = socket.openReadChannel()
+            val head = buildHead(method, path, body, headers)
+            write.writeFully(if (body != null) head + body else head)
+            write.flush()
+            val (status, responseHeaders) = readHead(read)
+            if (status != 101 && status !in 200..299) {
+                return@withContext HttpResponse(status, responseHeaders, readBody(read, method, status, responseHeaders))
+            }
+            // Write and read at the same time: a command echoing its input (cat) would otherwise fill the
+            // output buffers and stop reading its input, and both sides would wait forever.
+            coroutineScope {
+                launch {
+                    if (stdin.isNotEmpty()) write.writeFully(stdin)
+                    write.flushAndClose()
+                }
+                HttpResponse(status, responseHeaders, readBody(read, method, status, responseHeaders))
+            }
+        } finally {
+            socket.close()
+        }
+    }
+
+    private fun buildHead(method: String, path: String, body: ByteArray?, headers: Map<String, String>): ByteArray =
+        buildString {
             append(method).append(' ').append(path).append(" HTTP/1.1\r\n")
             append("Host: ").append(hostHeader).append("\r\n")
             append("User-Agent: testcontainers-kmp\r\n")
@@ -92,35 +146,31 @@ internal class RawHttpClient(
             }
             append("\r\n")
         }.encodeToByteArray()
-        val exchange = Sockets.exchange(target, if (body != null) head + body else head)
-        try {
-            val read = exchange.input
-            val statusLine = read.readLine() ?: throw IOException("Empty HTTP response from $target")
-            val status = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
-                ?: throw IOException("Malformed HTTP status line: $statusLine")
 
-            val responseHeaders = mutableMapOf<String, String>()
-            while (true) {
-                val line = read.readLine() ?: break
-                if (line.isEmpty()) break
-                val idx = line.indexOf(':')
-                if (idx > 0) responseHeaders[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
-            }
-
-            val responseBody = when {
-                method == "HEAD" || status == 204 || status == 304 -> ByteArray(0)
-                responseHeaders["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true -> readChunked(read)
-                responseHeaders["content-length"] != null -> {
-                    val length = responseHeaders.getValue("content-length").toInt()
-                    if (length == 0) ByteArray(0) else read.readByteArray(length)
-                }
-                else -> readToEnd(read)
-            }
-            HttpResponse(status, responseHeaders, responseBody)
-        } finally {
-            exchange.close()
+    private suspend fun readHead(read: ByteReadChannel): Pair<Int, Map<String, String>> {
+        val statusLine = read.readLine() ?: throw IOException("Empty HTTP response from $target")
+        val status = statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+            ?: throw IOException("Malformed HTTP status line: $statusLine")
+        val responseHeaders = mutableMapOf<String, String>()
+        while (true) {
+            val line = read.readLine() ?: break
+            if (line.isEmpty()) break
+            val idx = line.indexOf(':')
+            if (idx > 0) responseHeaders[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
         }
+        return status to responseHeaders
     }
+
+    private suspend fun readBody(read: ByteReadChannel, method: String, status: Int, headers: Map<String, String>): ByteArray =
+        when {
+            method == "HEAD" || status == 204 || status == 304 -> ByteArray(0)
+            headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true -> readChunked(read)
+            headers["content-length"] != null -> {
+                val length = headers.getValue("content-length").toInt()
+                if (length == 0) ByteArray(0) else read.readByteArray(length)
+            }
+            else -> readToEnd(read)
+        }
 
     private suspend fun readToEnd(read: ByteReadChannel): ByteArray {
         val out = ByteArrayBuilder()

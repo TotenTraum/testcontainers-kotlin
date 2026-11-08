@@ -8,6 +8,7 @@ import ru.ttraum.testcontainers.internal.NetworkingConfig
 import ru.ttraum.testcontainers.internal.PortBinding
 import ru.ttraum.testcontainers.internal.TarEntry
 import ru.ttraum.testcontainers.internal.buildTar
+import ru.ttraum.testcontainers.internal.readTar
 import ru.ttraum.testcontainers.wait.Wait
 import ru.ttraum.testcontainers.wait.WaitStrategy
 import kotlinx.coroutines.NonCancellable
@@ -15,12 +16,16 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import ru.ttraum.testcontainers.wait.WaitProgress
 import kotlinx.serialization.json.JsonObject
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 public data class ExecResult(val exitCode: Int, val stdout: String, val stderr: String)
+
+/** The command did not finish within the timeout given to [GenericContainer.execInContainer]. */
+public class ExecTimeoutException(message: String) : RuntimeException(message)
 
 public data class ContainerLogs(val stdout: String, val stderr: String) {
     val all: String get() = stdout + stderr
@@ -57,6 +62,7 @@ public open class GenericContainer(
     private var entrypoint: List<String>? = null
     private var workingDir: String? = null
     private var user: String? = null
+    private var hostname: String? = null
     private var privileged: Boolean = false
     private var network: Network? = null
     private var name: String? = null
@@ -89,6 +95,9 @@ public open class GenericContainer(
     public fun withEntrypoint(vararg cmd: String): GenericContainer = apply { entrypoint = cmd.toList() }
     public fun withWorkingDirectory(dir: String): GenericContainer = apply { workingDir = dir }
     public fun withUser(user: String): GenericContainer = apply { this.user = user }
+
+    /** Hostname inside the container (what `hostname` prints, and the name other containers on the network may use). */
+    public fun withHostname(hostname: String): GenericContainer = apply { this.hostname = hostname }
     public fun withPrivilegedMode(enabled: Boolean = true): GenericContainer = apply { privileged = enabled }
     public fun withName(name: String): GenericContainer = apply { this.name = name }
     public fun withAlwaysPull(enabled: Boolean = true): GenericContainer = apply { alwaysPull = enabled }
@@ -153,6 +162,7 @@ public open class GenericContainer(
             exposedPorts = ports.associateWith { JsonObject(emptyMap()) }.ifEmpty { null },
             workingDir = workingDir,
             user = user,
+            hostname = hostname,
             hostConfig = HostConfig(
                 portBindings = exposedPorts.associate {
                     "$it/tcp" to listOf(PortBinding(hostPort = fixedPorts[it]?.toString() ?: ""))
@@ -200,21 +210,34 @@ public open class GenericContainer(
 
     private suspend fun waitUntilReady() {
         val strategy = waitStrategy ?: if (exposedPorts.isNotEmpty()) Wait.forListeningPort() else Wait.noWait()
-        withTimeout(startupTimeout) {
-            coroutineScope {
-                // Fail fast if the container exits while we are waiting.
-                val watcher = launch {
-                    while (true) {
-                        delay(500)
-                        val state = Docker.client.inspectContainer(requireId()).state
-                        if (state != null && !state.running && state.status in setOf("exited", "dead")) {
-                            throw ContainerLaunchException("Container exited with code ${state.exitCode} ${state.error.orEmpty()}")
+        val progress = WaitProgress()
+        val ready = withTimeoutOrNull(startupTimeout) {
+            withContext(progress) {
+                coroutineScope {
+                    // Fail fast if the container exits while we are waiting.
+                    val watcher = launch {
+                        while (true) {
+                            delay(500)
+                            val state = Docker.client.inspectContainer(requireId()).state
+                            if (state != null && !state.running && state.status in setOf("exited", "dead")) {
+                                throw ContainerLaunchException(
+                                    "Container exited with code ${state.exitCode} ${state.error.orEmpty()}".trim() +
+                                        " while waiting for ${progress.describe()}",
+                                )
+                            }
                         }
                     }
+                    strategy.waitUntilReady(this@GenericContainer)
+                    watcher.cancel()
                 }
-                strategy.waitUntilReady(this@GenericContainer)
-                watcher.cancel()
             }
+            true
+        }
+        if (ready == null) {
+            throw ContainerLaunchException(
+                "Timed out after $startupTimeout waiting for ${progress.describe()}",
+                progress.lastFailure,
+            )
         }
     }
 
@@ -229,10 +252,61 @@ public open class GenericContainer(
 
     // ---------------------------------------------------------------- interaction
 
-    public suspend fun execInContainer(vararg command: String): ExecResult {
-        val (code, out, err) = Docker.client.exec(requireId(), ExecCreateRequest(cmd = command.toList()))
-        return ExecResult(code, out, err)
+    /**
+     * Runs [command] in the running container and waits for it to finish, however long that takes
+     * (bounded by [timeout] when given).
+     *
+     * @param user user (`name`, `uid`, `uid:gid`) to run as; defaults to the container's user.
+     * @param env extra environment variables.
+     * @param workingDir working directory of the command.
+     * @param stdin input fed to the command; the stream is closed afterwards, so the command sees EOF.
+     *   Over a Windows named pipe it is passed through a temporary file instead (needs `/bin/sh`).
+     * @throws ExecTimeoutException when [timeout] passes first (the command is not killed inside the container).
+     */
+    public suspend fun execInContainer(
+        command: List<String>,
+        user: String? = null,
+        env: Map<String, String> = emptyMap(),
+        workingDir: String? = null,
+        stdin: ByteArray? = null,
+        timeout: Duration = Duration.INFINITE,
+    ): ExecResult {
+        val request = ExecCreateRequest(
+            cmd = command,
+            env = env.map { (k, v) -> "$k=$v" }.ifEmpty { null },
+            user = user,
+            workingDir = workingDir,
+        )
+        val id = requireId()
+        val output = withTimeoutOrNull(timeout) { Docker.client.exec(id, request, stdin) }
+            ?: throw ExecTimeoutException("Command $command did not finish within $timeout")
+        return ExecResult(output.exitCode, output.stdout, output.stderr)
     }
+
+    public suspend fun execInContainer(vararg command: String): ExecResult = execInContainer(command.toList())
+
+    public suspend fun execInContainer(
+        command: List<String>,
+        stdin: String,
+        user: String? = null,
+        env: Map<String, String> = emptyMap(),
+        workingDir: String? = null,
+        timeout: Duration = Duration.INFINITE,
+    ): ExecResult = execInContainer(command, user, env, workingDir, stdin.encodeToByteArray(), timeout)
+
+    /** Reads a regular file from the container (binary-safe). */
+    public suspend fun copyFileFromContainer(containerPath: String): ByteArray {
+        val entries = readTar(Docker.client.getArchive(requireId(), containerPath))
+        val file = entries.firstOrNull { it.type == '0' || it.type == '7' }
+            ?: throw DockerException("$containerPath is not a regular file (archive entries: ${entries.map { "${it.path} [${it.type}]" }})")
+        return file.content
+    }
+
+    /** Reads every regular file under [containerPath] (a file or a directory), keyed by its path in the archive. */
+    public suspend fun copyFilesFromContainer(containerPath: String): Map<String, ByteArray> =
+        readTar(Docker.client.getArchive(requireId(), containerPath))
+            .filter { it.type == '0' || it.type == '7' }
+            .associate { it.path to it.content }
 
     public suspend fun logs(): ContainerLogs {
         val output = Docker.client.logs(requireId())
@@ -245,8 +319,10 @@ public open class GenericContainer(
     }
 
     /** Whether the container's HEALTHCHECK reports `healthy`. */
-    public suspend fun isHealthy(): Boolean =
-        Docker.client.inspectContainer(requireId()).state?.health?.status == "healthy"
+    public suspend fun isHealthy(): Boolean = healthStatus() == "healthy"
+
+    /** HEALTHCHECK status (`starting`, `healthy`, `unhealthy`), or null when the image defines none. */
+    public suspend fun healthStatus(): String? = Docker.client.inspectContainer(requireId()).state?.health?.status
 
     /** IP address of the container inside its (first) network. */
     public suspend fun containerIpAddress(): String? =

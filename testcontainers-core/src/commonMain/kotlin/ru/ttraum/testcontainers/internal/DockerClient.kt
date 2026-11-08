@@ -3,7 +3,11 @@ package ru.ttraum.testcontainers.internal
 import ru.ttraum.testcontainers.DockerEndpoint
 import ru.ttraum.testcontainers.DockerException
 import ru.ttraum.testcontainers.toSocketTarget
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
+import kotlin.uuid.Uuid
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -15,6 +19,8 @@ internal val DockerJson = Json {
 
 /** Output of a multiplexed docker stream (logs / exec). */
 internal class StreamOutput(val stdout: String, val stderr: String)
+
+internal class ExecOutput(val exitCode: Int, val stdout: String, val stderr: String)
 
 /** Thin wrapper over the Docker Engine REST API. */
 internal class DockerClient(val endpoint: DockerEndpoint) {
@@ -85,24 +91,64 @@ internal class DockerClient(val endpoint: DockerEndpoint) {
         return demultiplex(response.body)
     }
 
+    /** Returns the tar archive of [path] (a file or a directory). */
+    suspend fun getArchive(id: String, path: String): ByteArray =
+        call("GET", "/containers/$id/archive?path=${urlEncode(path)}").body
+
     suspend fun putArchive(id: String, path: String, tar: ByteArray) {
         call("PUT", "/containers/$id/archive?path=${urlEncode(path)}", tar, contentType = "application/x-tar")
     }
 
-    suspend fun exec(id: String, request: ExecCreateRequest): Triple<Int, String, String> {
-        val execId = callJson<IdResponse>("POST", "/containers/$id/exec", encode(request)).id
-        val response = call(
-            "POST", "/exec/$execId/start", encode(ExecStartRequest()),
-            headers = mapOf("Connection" to "Upgrade", "Upgrade" to "tcp"),
-        )
+    /**
+     * Runs a command in a running container and returns its exit code and output once it has finished.
+     * The output stream ends when the process exits, so long commands simply take long; [stdin], if given,
+     * is fed to the process and then closed.
+     */
+    suspend fun exec(id: String, request: ExecCreateRequest, stdin: ByteArray? = null): ExecOutput {
+        if (stdin != null && endpoint is DockerEndpoint.NamedPipe) return execWithStdinFile(id, request, stdin)
+
+        val create = if (stdin != null) ExecCreateRequest(
+            cmd = request.cmd, attachStdin = true, env = request.env, user = request.user, workingDir = request.workingDir,
+        ) else request
+        val execId = callJson<IdResponse>("POST", "/containers/$id/exec", encode(create)).id
+        val startBody = encode(ExecStartRequest())
+        val startHeaders = mapOf("Content-Type" to "application/json", "Connection" to "Upgrade", "Upgrade" to "tcp")
+        val response = if (stdin != null) {
+            http.executeWithInput("POST", "/exec/$execId/start", startBody, startHeaders, stdin)
+        } else {
+            http.execute("POST", "/exec/$execId/start", startBody, startHeaders)
+        }
+        if (!response.isSuccess) {
+            throw DockerException("Docker API POST /exec/$execId/start failed (${response.status}): ${response.bodyText()}", response.status)
+        }
         val output = demultiplex(response.body)
+
+        // The stream has ended, so the process is done; Docker may need a moment to record the exit code.
         var inspect = callJson<ExecInspect>("GET", "/exec/$execId/json")
-        var attempts = 0
-        while ((inspect.running || inspect.exitCode == null) && attempts++ < 50) {
-            kotlinx.coroutines.delay(100)
+        val deadline = TimeSource.Monotonic.markNow() + 10.seconds
+        while (inspect.running || inspect.exitCode == null) {
+            if (deadline.hasPassedNow()) {
+                throw DockerException("exec ${request.cmd} finished its output, but Docker reported no exit code (running=${inspect.running})")
+            }
+            delay(50)
             inspect = callJson("GET", "/exec/$execId/json")
         }
-        return Triple(inspect.exitCode ?: -1, output.stdout, output.stderr)
+        return ExecOutput(inspect.exitCode, output.stdout, output.stderr)
+    }
+
+    /**
+     * Named pipes cannot half-close, so the process would never see the end of its input. Instead the input
+     * is copied into the container and redirected by a shell, which removes the file afterwards.
+     */
+    internal suspend fun execWithStdinFile(id: String, request: ExecCreateRequest, stdin: ByteArray): ExecOutput {
+        val file = "/tmp/.tc-stdin-${Uuid.random().toHexString()}"
+        putArchive(id, "/", buildTar(listOf(TarEntry(file, stdin, "600".toInt(8)))))
+        val script = "f=\$1; shift; \"\$@\" < \"\$f\"; rc=\$?; rm -f \"\$f\"; exit \$rc"
+        val wrapped = ExecCreateRequest(
+            cmd = listOf("/bin/sh", "-c", script, "sh", file) + request.cmd,
+            env = request.env, user = request.user, workingDir = request.workingDir,
+        )
+        return exec(id, wrapped, stdin = null)
     }
 
     suspend fun createNetwork(request: NetworkCreateRequest): String =

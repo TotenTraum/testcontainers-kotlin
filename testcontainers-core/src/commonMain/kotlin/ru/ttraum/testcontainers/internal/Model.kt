@@ -14,6 +14,7 @@ internal class ContainerCreateRequest(
     @SerialName("ExposedPorts") val exposedPorts: Map<String, JsonObject>? = null,
     @SerialName("WorkingDir") val workingDir: String? = null,
     @SerialName("User") val user: String? = null,
+    @SerialName("Hostname") val hostname: String? = null,
     @SerialName("HostConfig") val hostConfig: HostConfig? = null,
     @SerialName("NetworkingConfig") val networkingConfig: NetworkingConfig? = null,
 )
@@ -82,6 +83,7 @@ internal class NetworkEndpoint(
 @Serializable
 internal class ExecCreateRequest(
     @SerialName("Cmd") val cmd: List<String>,
+    @SerialName("AttachStdin") val attachStdin: Boolean = false,
     @SerialName("AttachStdout") val attachStdout: Boolean = true,
     @SerialName("AttachStderr") val attachStderr: Boolean = true,
     @SerialName("Env") val env: List<String>? = null,
