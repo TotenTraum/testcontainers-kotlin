@@ -176,10 +176,12 @@ class ConfigAndAuthTests {
 
     @Test
     fun runsExternalPrograms() = dockerTest {
-        // `sort` reads stdin on every platform.
-        val result = runProcess(listOf("sort"), "b\na\n")!!
+        // Both echo stdin back. Not `sort`: on Windows that resolves to System32\sort.exe, which does not
+        // read LF-only UTF-8 input as lines.
+        val echo = if (isWindows) listOf("findstr", ".") else listOf("cat")
+        val result = runProcess(echo, "b\na\n")!!
         assertEquals(0, result.exitCode)
-        assertEquals(listOf("a", "b"), result.stdout.lines().map { it.trim() }.filter { it.isNotEmpty() })
+        assertEquals(listOf("b", "a"), result.stdout.lines().map { it.trim() }.filter { it.isNotEmpty() })
         val missing = runProcess(listOf("docker-credential-does-not-exist", "get"), "x")
         assertTrue(missing == null || missing.exitCode != 0)
     }
