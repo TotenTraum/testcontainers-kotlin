@@ -83,8 +83,19 @@ jobs:
         with:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
-      - name: Docker info
-        run: docker version
+      # The engine is installed on windows-2025 but its service is not running at job start.
+      - name: Start Docker
+        shell: pwsh
+        run: |
+          Get-Service docker | Format-List Name, Status, StartType
+          Start-Service docker
+          for ($i = 0; $i -lt 30; $i++) {
+            docker version 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { break }
+            Start-Sleep -Seconds 2
+          }
+          docker version
+          if ($LASTEXITCODE -ne 0) { throw "Docker engine did not come up" }
       - name: Test
         env:
           TC_WINDOWS_TEST_IMAGE: mcr.microsoft.com/windows/nanoserver:ltsc2025
