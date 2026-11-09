@@ -8,6 +8,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import ru.ttraum.testcontainers.ContainerLaunchException
+import ru.ttraum.testcontainers.Docker
 import kotlinx.coroutines.flow.firstOrNull
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
@@ -132,13 +133,22 @@ public object Wait {
             c.execInContainer("/bin/sh", "-c", "grep -qi ':$hex ' /proc/net/tcp /proc/net/tcp6")
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            // A stopped container cannot exec either, and a proxy in front of it (Docker Desktop, a Compose
+            // ambassador) still accepts connections: never call that ready.
+            if (!isRunning(c)) throw NotReadyException("the container is not running", e)
             return // image without a shell: rely on the external check only
         }
         // 0: listening; 1: not yet; anything else: shell/grep/proc unavailable, rely on the external check
         if (result.exitCode == 1) {
             throw NotReadyException("port $port accepts host connections, but nothing listens on it inside the container yet")
         }
+        if (result.exitCode != 0 && !isRunning(c)) throw NotReadyException("the container is not running")
+    }
+
+    private suspend fun isRunning(c: GenericContainer): Boolean {
+        val id = c.containerId ?: return false
+        return runCatching { Docker.client.inspectContainer(id).state?.running }.getOrNull() ?: true
     }
 }
 

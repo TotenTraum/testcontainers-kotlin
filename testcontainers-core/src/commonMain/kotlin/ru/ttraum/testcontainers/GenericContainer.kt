@@ -567,7 +567,6 @@ public open class GenericContainer(
                     // Fail fast if the container exits while we are waiting.
                     val watcher = launch {
                         while (true) {
-                            delay(500)
                             val state = Docker.client.inspectContainer(requireId()).state
                             if (state != null && !state.running && state.status in setOf("exited", "dead")) {
                                 throw ContainerLaunchException(
@@ -575,6 +574,7 @@ public open class GenericContainer(
                                         " while waiting for ${progress.describe()}",
                                 )
                             }
+                            delay(500)
                         }
                     }
                     strategy.waitUntilReady(this@GenericContainer)

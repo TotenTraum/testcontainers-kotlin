@@ -257,6 +257,7 @@ public class ComposeContainer(composeFiles: List<String>, configure: ComposeCont
         val forward = unpublished.joinToString(" & ") { "socat TCP-LISTEN:$it,fork,reuseaddr TCP:$target:$it" } + " & wait"
         val ambassador = GenericContainer(image) {
             withNetworkMode(network)
+            withLabel(LABEL_AMBASSADOR_FOR, projectName)
             withExposedPorts(*unpublished.toIntArray())
             withEntrypoint("/bin/sh")
             withCommand("-c", forward)
@@ -304,6 +305,9 @@ public class ComposeContainer(composeFiles: List<String>, configure: ComposeCont
         public const val LABEL_PROJECT: String = "com.docker.compose.project"
         public const val LABEL_SERVICE: String = "com.docker.compose.service"
         public const val LABEL_NUMBER: String = "com.docker.compose.container-number"
+
+        /** Set on socat ambassadors, with the project name (not Compose's own label, or `down` would see orphans). */
+        public const val LABEL_AMBASSADOR_FOR: String = "org.testcontainers.compose.ambassador-for"
 
         private var detected: List<String>? = null
         private val detectMutex = Mutex()

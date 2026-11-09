@@ -88,25 +88,34 @@ class ComposeTests {
         }
         val left = Docker.client.listContainers(mapOf("label" to listOf("${ComposeContainer.LABEL_PROJECT}=$project")))
         assertEquals(emptyList(), left, "down removes the project")
-        val ambassadors = Docker.client.listContainers(mapOf("label" to listOf("${Docker.LABEL_SESSION_ID}=${Docker.sessionId}"), "ancestor" to listOf("alpine/socat:1.8.0.3")))
+        val ambassadors = Docker.client.listContainers(mapOf("label" to listOf("${ComposeContainer.LABEL_AMBASSADOR_FOR}=$project")))
         assertEquals(emptyList(), ambassadors, "ambassadors are removed")
     }
 
     @Test
     fun failingServiceReportsItsLogs() = composeTest {
-        val compose = ComposeContainer(
-            composeFile(
-                """
-                services:
-                  broken:
-                    image: busybox:1.37
-                    command: ["sh", "-c", "echo boom-from-service; exit 3"]
-                """,
-            ),
-        ).withExposedService("broken", 80).withStartupTimeout(20.seconds)
-        val e = assertFailsWith<ContainerLaunchException> { compose.start() }
-        assertTrue(e.message!!.contains("boom-from-service"), e.message)
-        assertTrue(!compose.isRunning)
+        // Exits before `up` returns, while the ambassador starts (the race seen on Linux CI), and during the wait.
+        for (pause in listOf("", "sleep 0.3;", "sleep 1;")) {
+            val compose = ComposeContainer(
+                composeFile(
+                    """
+                    services:
+                      broken:
+                        image: busybox:1.37
+                        command: ["sh", "-c", "echo boom-from-service; $pause exit 3"]
+                    """,
+                ),
+            ).withExposedService("broken", 80).withStartupTimeout(20.seconds)
+            try {
+                val e = assertFailsWith<ContainerLaunchException>("pause '$pause'") { compose.start() }
+                assertTrue(e.message!!.contains("boom-from-service"), "pause '$pause': ${e.message}")
+                assertTrue(!compose.isRunning)
+                val ambassadors = Docker.client.listContainers(mapOf("label" to listOf("${ComposeContainer.LABEL_AMBASSADOR_FOR}=${compose.projectName}")))
+                assertEquals(emptyList(), ambassadors, "pause '$pause': ambassador removed")
+            } finally {
+                compose.stop()
+            }
+        }
     }
 
     @Test
