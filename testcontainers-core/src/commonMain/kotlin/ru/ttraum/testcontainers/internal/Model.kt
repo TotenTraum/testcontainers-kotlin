@@ -149,7 +149,13 @@ internal class ImageMetadata(@SerialName("LastTagTime") val lastTagTime: String?
 internal class WaitResponse(@SerialName("StatusCode") val statusCode: Int)
 
 @Serializable
-internal class ContainerSummary(@SerialName("Id") val id: String)
+internal class ContainerSummary(
+    @SerialName("Id") val id: String,
+    @SerialName("Names") val names: List<String>? = null,
+    @SerialName("Image") val image: String? = null,
+    @SerialName("State") val state: String? = null,
+    @SerialName("Labels") val labels: Map<String, String>? = null,
+)
 
 @Serializable
 internal class VolumeCreateRequest(

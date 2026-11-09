@@ -18,20 +18,23 @@ import platform.posix.fgets
 import kotlinx.cinterop.CPointer
 import platform.posix.FILE
 import kotlin.random.Random
+import kotlin.time.Duration
 
 /**
  * Kotlin/Native has no process API, so this goes through the shell (`popen`): stdin comes from a temporary
- * file, stdout is read from the pipe. The command words must be plain (no quoting is done), which holds
- * for `docker-credential-<name> get`.
+ * file, stdout is read from the pipe. Words are quoted for `/bin/sh` or `cmd.exe`; [timeout] is not enforced.
  */
-internal actual suspend fun runProcess(command: List<String>, stdin: String): ProcessResult? = withContext(Dispatchers.IO) {
-    require(command.all { word -> word.all { it.isLetterOrDigit() || it in "-_./:\\" } }) { "Unsafe command: $command" }
+internal actual suspend fun runProcess(
+    command: List<String>,
+    stdin: String,
+    env: Map<String, String>,
+    mergeStderr: Boolean,
+    timeout: Duration,
+): ProcessResult? = withContext(Dispatchers.IO) {
     val input = Path(SystemTemporaryDirectory, "tc-stdin-${Random.nextLong().toULong()}")
     SystemFileSystem.sink(input).buffered().use { it.writeString(stdin) }
     try {
-        val redirect = if (isWindows) " 2>NUL" else " 2>/dev/null"
-        val line = command.joinToString(" ") + " < \"" + input.toString() + "\"" + redirect
-        val pipe = openPipe(line) ?: return@withContext null
+        val pipe = openPipe(shellLine(command, env, input.toString(), mergeStderr)) ?: return@withContext null
         val out = StringBuilder()
         memScoped {
             val buffer = allocArray<ByteVar>(4096)
@@ -45,6 +48,25 @@ internal actual suspend fun runProcess(command: List<String>, stdin: String): Pr
         runCatching { SystemFileSystem.delete(input) }
     }
 }
+
+internal fun shellLine(command: List<String>, env: Map<String, String>, stdinFile: String, mergeStderr: Boolean, windows: Boolean = isWindows): String {
+    val quote: (String) -> String = if (windows) ::quoteCmd else ::quoteSh
+    val stderr = if (mergeStderr) " 2>&1" else if (windows) " 2>NUL" else " 2>/dev/null"
+    val prefix = if (windows) {
+        // `set "K=V"` keeps trailing characters out of the value; the line must not start with a quote.
+        env.entries.joinToString("") { (k, v) -> "set \"$k=$v\"&& " }
+    } else {
+        env.entries.joinToString("") { (k, v) -> quoteSh("$k=$v") + " " }.let { if (it.isEmpty()) it else "env $it" }
+    }
+    return prefix + command.joinToString(" ") { quote(it) } + " < " + quote(stdinFile) + stderr
+}
+
+private val SAFE = Regex("[A-Za-z0-9_./:=@%+,-]+")
+
+private fun quoteSh(word: String): String = if (SAFE.matches(word)) word else "'" + word.replace("'", "'\\''") + "'"
+
+private fun quoteCmd(word: String): String =
+    if (SAFE.matches(word.replace('\\', '/'))) word else "\"" + word.replace("\"", "\\\"") + "\""
 
 /** `popen(command, "r")`; `_popen` on Windows. */
 internal expect fun openPipe(command: String): CPointer<FILE>?

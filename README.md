@@ -40,7 +40,9 @@ PostgreSQLContainer { databaseName = "app" }.use { pg ->
   followed by the container logs.
 - Images: pull policies (`defaultPolicy`, `alwaysPull`, `ageBased`) with retries of transient failures,
   registry credentials from the docker CLI config (`auths`, `credHelpers`, `credsStore`, `DOCKER_AUTH_CONFIG`),
-  name substitution for registry mirrors (`hub.image.name.prefix`), images built from a Dockerfile (`ImageFromDockerfile`).
+  name substitution for registry mirrors (`hub.image.name.prefix`), images built from a Dockerfile (`ImageFromDockerfile`,
+  honouring `.dockerignore` and `<Dockerfile>.dockerignore`).
+- Docker Compose: `ComposeContainer` (below).
 - Cleanup through Ryuk (`testcontainers/ryuk`), on JVM and Native alike.
 - Modules: `PostgreSQLContainer`, `RedisContainer`.
 
@@ -57,6 +59,26 @@ fun redis() {
     }
 }
 ```
+
+## Docker Compose
+`ComposeContainer` runs a project with the `docker compose` CLI (or `docker-compose`) against the same daemon,
+under a random project name, and waits for the services you declare:
+
+```kotlin
+ComposeContainer("src/test/resources/compose.yaml")
+    .withEnv("TAG", "16")                       // ${TAG} in the compose file
+    .withExposedService("db", 5432, Wait.forLogMessage(".*ready to accept connections.*", times = 2))
+    .withExposedService("api", 8080, Wait.forHttp("/health"))
+    .use { compose ->
+        val port = compose.getServicePort("api", 8080)
+        compose.getContainer("db").execInContainer("psql", "-U", "postgres", "-c", "select 1")
+    }
+```
+
+Ports need not be published in the compose file: unpublished ones are forwarded through a socat ambassador
+(`alpine/socat`, override with `socat.container.image`). `getContainer("worker-2")` reaches other replicas.
+Also: profiles, `withBuild()`, `withPull(...)`, `withRemoveImages(...)`, volumes removed on `stop()` by default.
+Ryuk removes the project's resources if the process dies.
 
 ## Configuration
 Settings are read like in testcontainers-java: the environment variable `TESTCONTAINERS_<KEY>`
@@ -100,7 +122,8 @@ Maven Central credentials and the signing key are read from `~/.gradle/gradle.pr
 this repository. Publish from macOS: the Apple targets cannot be built elsewhere.
 
 ## Not supported yet
-HTTPS wait strategies on native targets (JVM only), TLS for `tcp://` (detected and reported, not supported), `.dockerignore` in builds, Windows containers (Linux containers via Docker Desktop only), Docker Compose, JS/Wasm targets.
+HTTPS wait strategies on native targets (JVM only), TLS for `tcp://` (detected and reported, not supported), JS/Wasm targets.
+On native targets the `docker compose` CLI call has no timeout.
 
 ```bash
 ./gradlew :testcontainers-core:jvmTest :testcontainers-core:macosArm64Test

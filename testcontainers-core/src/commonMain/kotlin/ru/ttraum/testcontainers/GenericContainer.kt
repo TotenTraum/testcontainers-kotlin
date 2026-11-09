@@ -497,8 +497,40 @@ public open class GenericContainer(
         }
     }
 
-    private suspend fun resolveMappedPorts(id: String): Map<String, Int> {
-        val keys = exposedTcp.map { "$it/tcp" } + exposedUdp.map { "$it/udp" }
+    /**
+     * Attaches to a container someone else created (a Compose service): resolves the exposed ports, unless
+     * [portOverrides] (`"80/tcp"` to a host port, e.g. through an ambassador) gives them, then waits until ready.
+     */
+    internal suspend fun attach(id: String, portOverrides: Map<String, Int> = emptyMap()): Unit = startMutex.withLock {
+        containerId = id
+        try {
+            val missing = (exposedTcp.map { "$it/tcp" } + exposedUdp.map { "$it/udp" }).filter { it !in portOverrides }
+            mappedPorts = portOverrides + (if (missing.isEmpty()) emptyMap() else resolveMappedPorts(id, missing))
+            startLogConsumers(id)
+            waitUntilReady()
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { stopLogConsumers() }
+            containerId = null
+            mappedPorts = emptyMap()
+            throw e
+        }
+    }
+
+    /** Forgets an [attach]ed container without removing it. */
+    internal suspend fun detach() {
+        if (containerId == null) return
+        withContext(NonCancellable) {
+            withTimeoutOrNull(1.seconds) { logJobs.toList().joinAll() }
+            stopLogConsumers()
+        }
+        containerId = null
+        mappedPorts = emptyMap()
+    }
+
+    private suspend fun resolveMappedPorts(
+        id: String,
+        keys: List<String> = exposedTcp.map { "$it/tcp" } + exposedUdp.map { "$it/udp" },
+    ): Map<String, Int> {
         if (networkMode == "host") return keys.associateWith { it.substringBefore('/').toInt() }
         // Port bindings may appear a while after start, especially on a busy Docker Desktop.
         val deadline = TimeSource.Monotonic.markNow() + 10.seconds

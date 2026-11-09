@@ -38,6 +38,13 @@ internal fun DockerEndpoint.toSocketTarget(): SocketTarget = when (this) {
     is DockerEndpoint.NamedPipe -> SocketTarget.NamedPipe(pipePath)
 }
 
+/** The endpoint as a `DOCKER_HOST` value, for the docker CLI. */
+internal fun DockerEndpoint.toDockerHost(): String = when (this) {
+    is DockerEndpoint.Unix -> "unix://$socketPath"
+    is DockerEndpoint.Tcp -> "tcp://$host:$port"
+    is DockerEndpoint.NamedPipe -> "npipe://" + pipePath.replace('\\', '/')
+}
+
 /** Host on which mapped container ports are reachable. */
 internal fun DockerEndpoint.containerHost(): String =
     TestcontainersConfig.get("host.override") ?: when (this) {

@@ -60,10 +60,15 @@ class ImagesTests {
         write("Dockerfile", "FROM alpine:latest\nCOPY . /ctx/\nCMD [\"sleep\", \"300\"]\n")
         write("conf/app.conf", "key=value\n")
         write("run.sh", "#!/bin/sh\necho ok\n")
+        write(".dockerignore", "secret\n**/*.tmp\n")
+        write("secret/key.pem", "x")
+        write("conf/cache.tmp", "x")
 
         GenericContainer(ImageFromDockerfile().withFileFromPath(".", dir.toString())).use { c ->
             assertEquals("key=value", c.execInContainer("cat", "/ctx/conf/app.conf").stdout.trim())
             assertEquals("ok", c.execInContainer("/ctx/run.sh").stdout.trim()) // #! files stay executable
+            // .dockerignore keeps them out of the context.
+            assertEquals("", c.execInContainer("sh", "-c", "ls /ctx/secret /ctx/conf/cache.tmp 2>/dev/null").stdout)
         }
     }
 

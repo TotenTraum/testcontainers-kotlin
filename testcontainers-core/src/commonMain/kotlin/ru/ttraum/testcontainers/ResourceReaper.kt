@@ -55,6 +55,20 @@ internal object ResourceReaper {
         }
     }
 
+    /**
+     * Asks Ryuk to also remove what matches [filter] (`label=key=value`) when this process dies, e.g. the
+     * resources of a Compose project, which cannot carry our session label.
+     */
+    suspend fun registerFilter(filter: String) {
+        ensureStarted()
+        mutex.withLock {
+            val w = write ?: return // disabled, or a Windows daemon
+            w.writeStringUtf8("$filter\n")
+            val ack = read?.readLine()
+            if (ack != "ACK") throw DockerException("Ryuk did not acknowledge $filter: $ack")
+        }
+    }
+
     private suspend fun start() {
         val client = Docker.client
         Docker.ensureImage(image)

@@ -25,7 +25,10 @@ import kotlin.uuid.Uuid
  * ```
  *
  * The image is labelled with the session id, so Ryuk removes it when the process ends.
- * Files read from the host are executable (0755) if they start with `#!`, else 0644; `.dockerignore` is not applied.
+ * Files read from the host are executable (0755) if they start with `#!`, else 0644.
+ *
+ * A `.dockerignore` in the context root (or `<dockerfile>.dockerignore` next to the Dockerfile, which takes
+ * precedence) filters the whole context, as `docker build` does; the Dockerfile and the ignore file are always sent.
  */
 public class ImageFromDockerfile(
     public val imageName: String = "localhost/testcontainers/${Uuid.random().toHexString().take(16)}:latest",
@@ -91,12 +94,21 @@ public class ImageFromDockerfile(
             .mapNotNull { registry -> Docker.registryCredentials.credentialsFor(registry)?.let { registry to it } }
             .toMap()
         val id = Docker.client.buildImage(
-            buildTar(files.values.toList()),
+            buildTar(contextEntries()),
             query,
             credentials.takeIf { it.isNotEmpty() }?.let(::registryConfigHeader),
         )
         builtId = id
         id
+    }
+
+    /** The context after `.dockerignore`. */
+    internal fun contextEntries(): List<TarEntry> {
+        val ignoreFile = files["$dockerfilePath.dockerignore"] ?: files[".dockerignore"] ?: return files.values.toList()
+        val ignore = DockerIgnore(ignoreFile.content.decodeToString())
+        if (ignore.isEmpty) return files.values.toList()
+        val alwaysSent = setOf(dockerfilePath, ignoreFile.path)
+        return files.values.filter { it.path in alwaysSent || !ignore.isExcluded(it.path) }
     }
 
     /** Base images named in `FROM` lines (stage names and `scratch` excluded), for registry credentials. */

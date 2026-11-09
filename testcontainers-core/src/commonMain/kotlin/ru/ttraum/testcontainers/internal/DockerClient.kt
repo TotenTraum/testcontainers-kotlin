@@ -167,9 +167,11 @@ internal class DockerClient(val endpoint: DockerEndpoint) {
         callJson<WaitResponse>("POST", "/containers/$id/wait").statusCode
 
     /** Ids of containers matching Docker's list [filters] (e.g. `label` → `["a=b"]`, `status` → `["running"]`). */
-    suspend fun listContainers(filters: Map<String, List<String>>): List<String> {
+    suspend fun listContainers(filters: Map<String, List<String>>): List<String> = listContainerSummaries(filters).map { it.id }
+
+    suspend fun listContainerSummaries(filters: Map<String, List<String>>, all: Boolean = false): List<ContainerSummary> {
         val json = JsonObject(filters.mapValues { (_, v) -> JsonArray(v.map(::JsonPrimitive)) }).toString()
-        return callJson<List<ContainerSummary>>("GET", "/containers/json?all=false&filters=${urlEncode(json)}").map { it.id }
+        return callJson("GET", "/containers/json?all=$all&filters=${urlEncode(json)}")
     }
 
     suspend fun createVolume(name: String, labels: Map<String, String>) {
