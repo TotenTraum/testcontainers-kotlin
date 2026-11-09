@@ -1,20 +1,41 @@
 package ru.ttraum.testcontainers.wait
 
 import ru.ttraum.testcontainers.GenericContainer
-import ru.ttraum.testcontainers.internal.RawHttpClient
 import ru.ttraum.testcontainers.internal.SocketTarget
 import ru.ttraum.testcontainers.internal.Sockets
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import ru.ttraum.testcontainers.ContainerLaunchException
+import kotlinx.coroutines.flow.firstOrNull
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.coroutineContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
-/** Decides when a started container is ready. The overall timeout is applied by the container. */
+/**
+ * Decides when a started container is ready. The overall limit is the container's startup timeout;
+ * [withStartupTimeout] gives one strategy (e.g. inside [Wait.allOf]) its own.
+ */
 public fun interface WaitStrategy {
     public suspend fun waitUntilReady(container: GenericContainer)
+
+    /** This strategy, failing on its own after [timeout] with what it waited for. */
+    public fun withStartupTimeout(timeout: Duration): WaitStrategy {
+        val inner = this
+        return WaitStrategy { c ->
+            val done = withTimeoutOrNull(timeout) { inner.waitUntilReady(c); true }
+            if (done == null) {
+                val progress = currentCoroutineContext()[WaitProgress]
+                throw ContainerLaunchException(
+                    "Timed out after $timeout waiting for ${progress?.describe() ?: "the wait strategy"}",
+                    progress?.lastFailure,
+                )
+            }
+        }
+    }
 }
 
 /** Thrown by a check to say why the container is not ready yet; the reason ends up in the timeout message. */
@@ -42,11 +63,18 @@ public object Wait {
     /** Waits until a log line matching [regex] has appeared [times] times. */
     public fun forLogMessage(regex: String, times: Int = 1): WaitStrategy = WaitStrategy { c ->
         val pattern = Regex(regex)
-        pollUntil("log message '$regex' x$times") {
-            val found = c.logs().all.lineSequence().count { pattern.containsMatchIn(it) }
-            if (found < times) throw NotReadyException("found $found of $times matching lines")
-            true
+        val progress = coroutineContext[WaitProgress]
+        progress?.apply { what = "log message '$regex' x$times"; attempts = 0; lastFailure = NotReadyException("found 0 of $times matching lines") }
+        // Follows the output as it is produced instead of re-reading all logs.
+        var found = 0
+        val reached = c.logLines(follow = true).firstOrNull { line ->
+            if (pattern.containsMatchIn(line.text)) {
+                found++
+                progress?.lastFailure = NotReadyException("found $found of $times matching lines")
+            }
+            found >= times
         }
+        if (reached == null) throw NotReadyException("the output ended (container stopped) after $found of $times matching lines")
     }
 
     /** Waits for Docker's HEALTHCHECK status to become `healthy`. */
@@ -58,18 +86,30 @@ public object Wait {
         }
     }
 
-    /** Waits until an HTTP GET to [path] on [port] (default: first exposed) returns [statusCode]. */
-    public fun forHttp(path: String = "/", port: Int? = null, statusCode: Int = 200): WaitStrategy =
-        WaitStrategy { c ->
-            val containerPort = port ?: c.getExposedPorts().first()
-            pollUntil("HTTP $statusCode on $path (port $containerPort)") {
-                val mapped = c.getMappedPort(containerPort)
-                val client = RawHttpClient(SocketTarget.Tcp(c.host, mapped), hostHeader = "${c.host}:$mapped")
-                val status = client.execute("GET", path).status
-                if (status != statusCode) throw NotReadyException("got HTTP $status")
-                true
-            }
+    /**
+     * Waits until an HTTP request to [path] answers as expected; refine it with the returned builder
+     * (port, status codes, body predicate, method, headers, credentials, TLS).
+     */
+    public fun forHttp(path: String = "/", port: Int? = null, statusCode: Int? = null): HttpWaitStrategy =
+        HttpWaitStrategy(path).also { s ->
+            port?.let(s::forPort)
+            statusCode?.let(s::forStatusCode)
         }
+
+    /** Like [forHttp] over HTTPS (JVM only). */
+    public fun forHttps(path: String = "/", port: Int? = null): HttpWaitStrategy = forHttp(path, port).usingTls()
+
+    /** Waits until [command] exits with code 0 inside the container (re-run every 200 ms). */
+    public fun forSuccessfulCommand(vararg command: String): WaitStrategy = WaitStrategy { c ->
+        pollUntil("command ${command.joinToString(" ")} to succeed") {
+            val result = c.execInContainer(*command)
+            if (result.exitCode != 0) {
+                val output = (result.stderr.ifBlank { result.stdout }).trim().take(200)
+                throw NotReadyException("exit code ${result.exitCode}" + if (output.isNotEmpty()) ": $output" else "")
+            }
+            true
+        }
+    }
 
     /** Waits for all strategies in order. */
     public fun allOf(vararg strategies: WaitStrategy): WaitStrategy = WaitStrategy { c ->

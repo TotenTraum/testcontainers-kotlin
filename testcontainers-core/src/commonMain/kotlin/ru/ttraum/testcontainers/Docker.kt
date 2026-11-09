@@ -45,29 +45,48 @@ public object Docker {
 
     private val pullMutex = Mutex()
 
-    /** Makes sure [image] (already substituted) is available according to [policy]. */
-    internal suspend fun ensureImage(image: String, policy: PullPolicy = PullPolicy.defaultPolicy()) = pullMutex.withLock {
-        val local = client.inspectImage(image)?.let { LocalImage(it.id, lastUpdated(it)) }
-        if (policy.shouldPull(image, local)) pull(image)
+    /** Where the library's own messages go; see [TestcontainersLogger.Default]. */
+    public var logger: TestcontainersLogger = TestcontainersLogger.Default
+
+    /**
+     * Makes sure [image] (already substituted) is available according to [policy]. With [platform]
+     * (`linux/amd64`), a local image of another platform counts as missing.
+     */
+    internal suspend fun ensureImage(image: String, policy: PullPolicy = PullPolicy.defaultPolicy(), platform: String? = null) =
+        pullMutex.withLock {
+            val inspect = client.inspectImage(image)?.takeIf { platform == null || matchesPlatform(it, platform) }
+            val local = inspect?.let { LocalImage(it.id, lastUpdated(it)) }
+            if (policy.shouldPull(image, local)) {
+                logInfo("Pulling image $image${platform?.let { " ($it)" } ?: ""}")
+                pull(image, platform)
+            }
+        }
+
+    private fun matchesPlatform(image: ImageInspect, platform: String): Boolean {
+        val parts = platform.split('/')
+        if (parts.getOrNull(0)?.let { it != image.os } == true) return false
+        if (parts.getOrNull(1)?.let { it != image.architecture } == true) return false
+        return parts.getOrNull(2)?.let { it == image.variant } ?: true
     }
 
     /**
      * Pulls with registry credentials, retrying transient failures (network, 5xx) `pull.retries` times
      * (default 2); "not found" and "denied" fail at once.
      */
-    internal suspend fun pull(image: String) {
+    internal suspend fun pull(image: String, platform: String? = null) {
         val registry = registryOf(image)
         val auth = registryCredentials.credentialsFor(registry)?.let { registryAuthHeader(registry, it) }
         val retries = TestcontainersConfig.get("pull.retries")?.toIntOrNull() ?: 2
         var attempt = 0
         while (true) {
             try {
-                client.pullImage(image, auth)
+                client.pullImage(image, auth, platform)
                 return
             } catch (e: DockerException) {
                 val permanent = e.statusCode in 400..499 || PERMANENT_PULL_ERRORS.any { e.message.orEmpty().contains(it, ignoreCase = true) }
                 if (permanent || attempt >= retries) throw e
                 attempt++
+                logWarn("Pulling $image failed (${e.message}); retry $attempt of $retries")
                 delay((attempt * 2).seconds)
             }
         }
@@ -88,6 +107,12 @@ public object Docker {
 
     public suspend fun isWindowsDaemon(): Boolean = serverOs().equals("windows", ignoreCase = true)
 
+    /** Blocking [isWindowsDaemon]. */
+    public fun isWindowsDaemonBlocking(): Boolean = runBlockingCompat { isWindowsDaemon() }
+
     /** Checks connectivity with the daemon. */
     public suspend fun isAvailable(): Boolean = runCatching { client.ping() == "OK" }.getOrDefault(false)
+
+    /** Blocking [isAvailable]. */
+    public fun isAvailableBlocking(): Boolean = runBlockingCompat { isAvailable() }
 }

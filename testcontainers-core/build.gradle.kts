@@ -25,7 +25,8 @@ kotlin {
         }
         commonMain.dependencies {
             api(libs.kotlinx.coroutines.core)
-            implementation(libs.kotlinx.serialization.json)
+            // JsonObject is part of the public API (GenericContainer.withCreateContainerModifier).
+            api(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.io.core)
             implementation(libs.ktor.network)
         }

@@ -4,6 +4,13 @@ import ru.ttraum.testcontainers.DockerEndpoint
 import ru.ttraum.testcontainers.DockerException
 import ru.ttraum.testcontainers.toSocketTarget
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.encodeToJsonElement
+import ru.ttraum.testcontainers.FrameDecoder
+import ru.ttraum.testcontainers.OutputFrame
 import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
@@ -61,10 +68,11 @@ internal class DockerClient(val endpoint: DockerEndpoint) {
         return if (response.status == 404) null else DockerJson.decodeFromString(response.bodyText())
     }
 
-    suspend fun pullImage(image: String, registryAuth: String? = null) {
+    suspend fun pullImage(image: String, registryAuth: String? = null, platform: String? = null) {
         val (repo, tag) = splitImage(image)
         val headers = registryAuth?.let { mapOf("X-Registry-Auth" to it) } ?: emptyMap()
-        val response = call("POST", "/images/create?fromImage=${urlEncode(repo)}&tag=${urlEncode(tag)}", headers = headers)
+        val platformQuery = platform?.let { "&platform=${urlEncode(it)}" } ?: ""
+        val response = call("POST", "/images/create?fromImage=${urlEncode(repo)}&tag=${urlEncode(tag)}$platformQuery", headers = headers)
         // The body is a stream of JSON progress objects; errors are reported in-band.
         checkStream(response.bodyText()) { "Failed to pull $image: $it" }
     }
@@ -111,9 +119,14 @@ internal class DockerClient(val endpoint: DockerEndpoint) {
         }
     }
 
-    suspend fun createContainer(request: ContainerCreateRequest, name: String? = null): String {
-        val query = name?.let { "?name=${urlEncode(it)}" } ?: ""
-        return callJson<IdResponse>("POST", "/containers/create$query", encode(request)).id
+    suspend fun createContainer(request: ContainerCreateRequest, name: String? = null): String =
+        createContainer(DockerJson.encodeToJsonElement(request) as JsonObject, name, platform = null)
+
+    /** Creates a container from a raw create body (after user modifiers); [platform] like `linux/amd64`. */
+    suspend fun createContainer(body: JsonObject, name: String?, platform: String?): String {
+        val query = listOfNotNull(name?.let { "name=${urlEncode(it)}" }, platform?.let { "platform=${urlEncode(it)}" })
+            .joinToString("&").let { if (it.isEmpty()) "" else "?$it" }
+        return callJson<IdResponse>("POST", "/containers/create$query", body.toString().encodeToByteArray()).id
     }
 
     suspend fun startContainer(id: String) {
@@ -138,6 +151,30 @@ internal class DockerClient(val endpoint: DockerEndpoint) {
     /** Returns the tar archive of [path] (a file or a directory). */
     suspend fun getArchive(id: String, path: String): ByteArray =
         call("GET", "/containers/$id/archive?path=${urlEncode(path)}").body
+
+    /** Container output as it is produced; with [follow] the flow ends only when the container stops. */
+    fun logStream(id: String, follow: Boolean, sinceEpochSeconds: Long? = null): Flow<OutputFrame> = flow {
+        val decoder = FrameDecoder()
+        val query = buildString {
+            append("stdout=true&stderr=true&follow=").append(follow)
+            sinceEpochSeconds?.let { append("&since=").append(it) }
+        }
+        http.stream("GET", "/containers/$id/logs?$query") { bytes -> decoder.feed(bytes).forEach { emit(it) } }
+    }
+
+    /** Blocks until the container exits; returns its exit code. */
+    suspend fun waitContainer(id: String): Int =
+        callJson<WaitResponse>("POST", "/containers/$id/wait").statusCode
+
+    /** Ids of containers matching Docker's list [filters] (e.g. `label` → `["a=b"]`, `status` → `["running"]`). */
+    suspend fun listContainers(filters: Map<String, List<String>>): List<String> {
+        val json = JsonObject(filters.mapValues { (_, v) -> JsonArray(v.map(::JsonPrimitive)) }).toString()
+        return callJson<List<ContainerSummary>>("GET", "/containers/json?all=false&filters=${urlEncode(json)}").map { it.id }
+    }
+
+    suspend fun createVolume(name: String, labels: Map<String, String>) {
+        call("POST", "/volumes/create", encode(VolumeCreateRequest(name, labels)))
+    }
 
     suspend fun putArchive(id: String, path: String, tar: ByteArray) {
         call("PUT", "/containers/$id/archive?path=${urlEncode(path)}", tar, contentType = "application/x-tar")

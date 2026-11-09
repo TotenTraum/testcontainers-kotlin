@@ -4,7 +4,9 @@ import ru.ttraum.testcontainers.internal.NetworkCreateRequest
 import kotlin.uuid.Uuid
 
 /** A user-defined bridge network shared by several containers. Created lazily on first use. */
-public class Network(public val name: String = "tc-${Uuid.random().toHexString().take(12)}") {
+public class Network(
+    public val name: String = "tc-${Uuid.random().toHexString().take(12)}",
+) {
     public var id: String? = null
         private set
 
@@ -20,4 +22,7 @@ public class Network(public val name: String = "tc-${Uuid.random().toHexString()
         id?.let { Docker.client.removeNetwork(it) }
         id = null
     }
+
+    /** Blocking [remove], for code outside coroutines. */
+    public fun removeBlocking(): Unit = runBlockingCompat { remove() }
 }

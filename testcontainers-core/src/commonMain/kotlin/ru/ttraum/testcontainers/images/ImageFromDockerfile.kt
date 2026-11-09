@@ -2,10 +2,6 @@ package ru.ttraum.testcontainers.images
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.io.buffered
-import kotlinx.io.files.Path
-import kotlinx.io.files.SystemFileSystem
-import kotlinx.io.readByteArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import ru.ttraum.testcontainers.Docker
@@ -13,6 +9,8 @@ import ru.ttraum.testcontainers.DockerException
 import ru.ttraum.testcontainers.ResourceReaper
 import ru.ttraum.testcontainers.internal.TarEntry
 import ru.ttraum.testcontainers.internal.buildTar
+import ru.ttraum.testcontainers.internal.guessMode
+import ru.ttraum.testcontainers.internal.readHostTree
 import ru.ttraum.testcontainers.internal.urlEncode
 import kotlin.uuid.Uuid
 
@@ -48,10 +46,10 @@ public class ImageFromDockerfile(
     /** Uses a Dockerfile that is already part of the build context (default `Dockerfile`). */
     public fun withDockerfilePath(path: String): ImageFromDockerfile = apply { dockerfilePath = path }
 
-    public fun withFileFromString(contextPath: String, content: String, mode: Int = modeFor(content.encodeToByteArray())): ImageFromDockerfile =
+    public fun withFileFromString(contextPath: String, content: String, mode: Int = guessMode(content.encodeToByteArray())): ImageFromDockerfile =
         withFileFromBytes(contextPath, content.encodeToByteArray(), mode)
 
-    public fun withFileFromBytes(contextPath: String, content: ByteArray, mode: Int = modeFor(content)): ImageFromDockerfile = apply {
+    public fun withFileFromBytes(contextPath: String, content: ByteArray, mode: Int = guessMode(content)): ImageFromDockerfile = apply {
         val path = contextPath.trimStart('/')
         files[path] = TarEntry(path, content, mode)
     }
@@ -59,7 +57,7 @@ public class ImageFromDockerfile(
     /** Adds a host file, or a whole host directory, at [contextPath] in the build context ("" or "." for the root). */
     public fun withFileFromPath(contextPath: String, hostPath: String): ImageFromDockerfile = apply {
         val base = contextPath.trim('/').removePrefix(".").trim('/')
-        addHostPath(Path(hostPath), base)
+        readHostTree(hostPath, base).forEach { files[it.path] = it }
     }
 
     public fun withBuildArg(key: String, value: String): ImageFromDockerfile = apply { buildArgs[key] = value }
@@ -117,22 +115,5 @@ public class ImageFromDockerfile(
         return images
     }
 
-    private fun addHostPath(path: Path, contextPath: String) {
-        val metadata = SystemFileSystem.metadataOrNull(path) ?: throw DockerException("No such file or directory: $path")
-        if (metadata.isDirectory) {
-            for (child in SystemFileSystem.list(path)) {
-                addHostPath(child, if (contextPath.isEmpty()) child.name else "$contextPath/${child.name}")
-            }
-        } else {
-            val bytes = SystemFileSystem.source(path).buffered().use { it.readByteArray() }
-            withFileFromBytes(contextPath.ifEmpty { path.name }, bytes)
-        }
-    }
-
     override fun toString(): String = "ImageFromDockerfile($imageName)"
-
-    private companion object {
-        fun modeFor(content: ByteArray): Int =
-            if (content.size >= 2 && content[0] == '#'.code.toByte() && content[1] == '!'.code.toByte()) "755".toInt(8) else "644".toInt(8)
-    }
 }

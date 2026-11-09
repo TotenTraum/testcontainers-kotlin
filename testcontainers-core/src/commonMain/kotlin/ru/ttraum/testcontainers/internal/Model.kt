@@ -27,6 +27,18 @@ internal class HostConfig(
     @SerialName("AutoRemove") val autoRemove: Boolean? = null,
     @SerialName("NetworkMode") val networkMode: String? = null,
     @SerialName("Tmpfs") val tmpfs: Map<String, String>? = null,
+    @SerialName("Memory") val memory: Long? = null,
+    @SerialName("MemorySwap") val memorySwap: Long? = null,
+    @SerialName("NanoCpus") val nanoCpus: Long? = null,
+    @SerialName("ShmSize") val shmSize: Long? = null,
+    @SerialName("Ulimits") val ulimits: List<Ulimit>? = null,
+    @SerialName("CapAdd") val capAdd: List<String>? = null,
+    @SerialName("CapDrop") val capDrop: List<String>? = null,
+    @SerialName("ExtraHosts") val extraHosts: List<String>? = null,
+    @SerialName("Dns") val dns: List<String>? = null,
+    @SerialName("VolumesFrom") val volumesFrom: List<String>? = null,
+    @SerialName("ReadonlyRootfs") val readonlyRootfs: Boolean? = null,
+    @SerialName("Init") val init: Boolean? = null,
 )
 
 @Serializable
@@ -123,9 +135,31 @@ internal class VersionResponse(
 @Serializable
 internal class ImageInspect(
     @SerialName("Id") val id: String,
+    @SerialName("Os") val os: String? = null,
+    @SerialName("Architecture") val architecture: String? = null,
+    @SerialName("Variant") val variant: String? = null,
     @SerialName("Created") val created: String? = null,
     @SerialName("Metadata") val metadata: ImageMetadata? = null,
 )
 
 @Serializable
 internal class ImageMetadata(@SerialName("LastTagTime") val lastTagTime: String? = null)
+
+@Serializable
+internal class WaitResponse(@SerialName("StatusCode") val statusCode: Int)
+
+@Serializable
+internal class ContainerSummary(@SerialName("Id") val id: String)
+
+@Serializable
+internal class VolumeCreateRequest(
+    @SerialName("Name") val name: String,
+    @SerialName("Labels") val labels: Map<String, String>,
+)
+
+@Serializable
+internal class Ulimit(
+    @SerialName("Name") val name: String,
+    @SerialName("Soft") val soft: Long,
+    @SerialName("Hard") val hard: Long,
+)

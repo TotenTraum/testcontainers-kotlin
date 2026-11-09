@@ -19,20 +19,44 @@ PostgreSQLContainer { databaseName = "app" }.use { pg ->
 ```
 
 ## Features
-- `GenericContainer`: ports (random/fixed), env, labels, cmd/entrypoint, hostname, bind mounts, tmpfs,
-  privileged mode, logs, networks with aliases.
-- Files: copy into a container (before or after start) and out of it (`copyFileFromContainer`,
-  `copyFilesFromContainer`), binary-safe.
+- `GenericContainer`: TCP and UDP ports (random/fixed), env, labels, cmd/entrypoint, hostname, network mode
+  (`host`, `none`, ...), extra hosts, DNS, `withAccessToHost()` (`host.testcontainers.internal`), platform,
+  memory/CPU/shm limits, ulimits, capabilities, read-only rootfs, init, bind mounts, named volumes, `volumesFrom`,
+  tmpfs, privileged mode, networks with aliases, and `withCreateContainerModifier` for the raw create body.
+- Lifecycle: startup checks (`isRunning`, `oneShot`, `minimumDuration`), startup attempts, `dependsOn`,
+  concurrent `startAll`/`stopAll`, hooks (`containerIsCreated`, `...Starting`, `...Started`, `...Stopping`,
+  `...Stopped`), reusable containers (`withReuse()` + `testcontainers.reuse.enable=true`).
+- Output: `logStream()` / `logLines()` flows, `withLogConsumer`, `followOutput`, `ToStringConsumer`; `awaitExit()`.
+  The library's own messages go to `Docker.logger` (`log.level`, default `WARN`).
+- Files: copy into a container (before or after start; bytes, host files/directories via `MountableFile`, classpath
+  resources on the JVM) and out of it (`copyFileFromContainer`, `copyFilesFromContainer`), binary-safe.
 - `execInContainer`: user, env, working directory, stdin (closed afterwards, so the command sees EOF),
   optional timeout; waits for the real exit code however long the command runs.
 - Wait strategies: `forListeningPort` (host side + `/proc/net/tcp` inside the container),
-  `forLogMessage`, `forHttp`, `forHealthcheck`, `allOf`. Startup fails fast if the container exits;
-  a timeout says what it waited for and the last reason it was not ready, followed by the container logs.
+  `forLogMessage` (follows the output stream), `forHttp` / `forHttps` (port, status codes or a status predicate,
+  body predicate, method, headers, basic auth, request body, read timeout; HTTPS with `allowInsecure()` on the JVM),
+  `forSuccessfulCommand`, `forHealthcheck`, `allOf`, and `withStartupTimeout` on any single strategy.
+  Startup fails fast if the container exits; a timeout says what it waited for and the last reason it was not ready,
+  followed by the container logs.
 - Images: pull policies (`defaultPolicy`, `alwaysPull`, `ageBased`) with retries of transient failures,
   registry credentials from the docker CLI config (`auths`, `credHelpers`, `credsStore`, `DOCKER_AUTH_CONFIG`),
   name substitution for registry mirrors (`hub.image.name.prefix`), images built from a Dockerfile (`ImageFromDockerfile`).
 - Cleanup through Ryuk (`testcontainers/ryuk`), on JVM and Native alike.
 - Modules: `PostgreSQLContainer`, `RedisContainer`.
+
+## Outside coroutines
+Every suspending operation has a blocking twin with a `Blocking` suffix, for plain test functions or `main()`:
+`startBlocking()`, `stopBlocking()`, `execInContainerBlocking(...)`, `logsBlocking()`, `copyFileFromContainerBlocking(...)`,
+`useBlocking { }`, `startAllBlocking(...)`, `Docker.isAvailableBlocking()`. Don't call them from a coroutine.
+
+```kotlin
+@Test
+fun redis() {
+    GenericContainer("redis:7-alpine") { withExposedPorts(6379) }.useBlocking { redis ->
+        connect(redis.host, redis.getMappedPort(6379))
+    }
+}
+```
 
 ## Configuration
 Settings are read like in testcontainers-java: the environment variable `TESTCONTAINERS_<KEY>`
@@ -45,6 +69,8 @@ Settings are read like in testcontainers-java: the environment variable `TESTCON
 | `docker.host` | daemon, after `DOCKER_HOST` |
 | `hub.image.name.prefix` | registry mirror for Docker Hub images, e.g. `registry.corp/mirror/` |
 | `pull.retries` | retries of transient pull failures (default 2) |
+| `testcontainers.reuse.enable` | allow `withReuse()` (or `TESTCONTAINERS_REUSE_ENABLE`) |
+| `log.level` | `DEBUG`, `INFO`, `WARN` (default), `ERROR` |
 | `ryuk.disabled`, `ryuk.container.image`, `ryuk.container.privileged` | resource reaper |
 | `host.override` | host for mapped ports |
 | `docker.socket.override` | socket path to mount into Ryuk |
@@ -74,7 +100,7 @@ Maven Central credentials and the signing key are read from `~/.gradle/gradle.pr
 this repository. Publish from macOS: the Apple targets cannot be built elsewhere.
 
 ## Not supported yet
-TLS for `tcp://` (detected and reported, not supported), `.dockerignore` in builds, Windows containers (Linux containers via Docker Desktop only), Docker Compose, JS/Wasm targets.
+HTTPS wait strategies on native targets (JVM only), TLS for `tcp://` (detected and reported, not supported), `.dockerignore` in builds, Windows containers (Linux containers via Docker Desktop only), Docker Compose, JS/Wasm targets.
 
 ```bash
 ./gradlew :testcontainers-core:jvmTest :testcontainers-core:macosArm64Test

@@ -17,6 +17,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.io.IOException
+import ru.ttraum.testcontainers.DockerException
 
 /** Where a socket connects to: a unix domain socket or a TCP host/port. */
 internal sealed interface SocketTarget {
@@ -127,6 +128,46 @@ internal class RawHttpClient(
             }
         } finally {
             socket.close()
+        }
+    }
+
+    /**
+     * Streams a response body: [onBytes] gets each piece as it arrives (chunk by chunk, or whatever the socket
+     * delivers). Used for endless streams such as `logs?follow=true`; cancelling the caller closes the connection.
+     * Runs in the caller's context (socket I/O suspends), so a flow can emit from [onBytes].
+     */
+    suspend fun stream(method: String, path: String, onBytes: suspend (ByteArray) -> Unit) {
+        val exchange = Sockets.exchange(target, buildHead(method, path, null, emptyMap()))
+        try {
+            val read = exchange.input
+            val (status, headers) = readHead(read)
+            if (status !in 200..299) {
+                val body = readBody(read, method, status, headers).decodeToString()
+                throw DockerException("Docker API $method $path failed ($status): $body", status)
+            }
+            when {
+                headers["transfer-encoding"]?.contains("chunked", ignoreCase = true) == true -> while (true) {
+                    val sizeLine = read.readLine() ?: break
+                    val size = sizeLine.substringBefore(';').trim().toInt(16)
+                    if (size == 0) break
+                    onBytes(read.readByteArray(size))
+                    read.readLine()
+                }
+                headers["content-length"] != null -> {
+                    val length = headers.getValue("content-length").toInt()
+                    if (length > 0) onBytes(read.readByteArray(length))
+                }
+                else -> {
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val n = read.readAvailable(buffer, 0, buffer.size)
+                        if (n < 0) break
+                        if (n > 0) onBytes(buffer.copyOf(n))
+                    }
+                }
+            }
+        } finally {
+            exchange.close()
         }
     }
 

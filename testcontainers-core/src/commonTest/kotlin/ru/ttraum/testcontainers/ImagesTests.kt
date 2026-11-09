@@ -80,8 +80,10 @@ class ImagesTests {
      */
     @Test
     fun pullsFromPrivateRegistryWithCredentials() = linuxContainerTest {
+        // A fixed port: on Docker Desktop only those are reachable by the daemon itself, which pushes and pulls here.
+        val registryPort = freeTcpPort()
         GenericContainer("registry:2") {
-            withExposedPorts(5000)
+            withFixedExposedPort(registryPort, 5000)
             withEnv("REGISTRY_AUTH", "htpasswd")
             withEnv("REGISTRY_AUTH_HTPASSWD_REALM", "tc")
             withEnv("REGISTRY_AUTH_HTPASSWD_PATH", "/auth/htpasswd")
@@ -89,7 +91,7 @@ class ImagesTests {
             waitingFor(Wait.forHttp("/v2/", statusCode = 401))
         }.use { registry ->
             // 127.0.0.1, not localhost: Docker Desktop's daemon resolves localhost to ::1 inside its VM.
-            val host = "127.0.0.1:${registry.getMappedPort(5000)}"
+            val host = "127.0.0.1:$registryPort"
             val creds = RegistryCredentials("tcuser", "tcpass")
             val pushed = "$host/tc/alpine:private"
             Docker.ensureImage("alpine:latest")
