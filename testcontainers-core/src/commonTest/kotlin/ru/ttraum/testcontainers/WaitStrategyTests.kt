@@ -1,5 +1,6 @@
 package ru.ttraum.testcontainers
 
+import ru.ttraum.testcontainers.images.ImageFromDockerfile
 import ru.ttraum.testcontainers.wait.Wait
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -17,6 +18,24 @@ class WaitStrategyTests {
         withCopyToContainer("/secret:tc:pw\n", "/etc/httpd.conf")
         withCommand("httpd", "-f", "-p", "80", "-h", "/w", "-c", "/etc/httpd.conf")
         configure()
+    }
+
+    @Test
+    fun listeningPortWithoutShellInImage() = linuxContainerTest {
+        // No /bin/sh: the in-container check cannot run, the host-side one decides.
+        val image = ImageFromDockerfile().withDockerfileFromString(
+            """
+            FROM busybox:1.37-musl AS tools
+            FROM scratch
+            COPY --from=tools /bin/busybox /busybox
+            CMD ["/busybox", "httpd", "-f", "-p", "8080", "-h", "/"]
+            """.trimIndent(),
+        )
+        val started = TimeSource.Monotonic.markNow()
+        GenericContainer(image) { withExposedPorts(8080); waitingFor(Wait.forListeningPort()) }.use { c ->
+            assertTrue(c.isRunning)
+            assertTrue(started.elapsedNow() < 30.seconds)
+        }
     }
 
     @Test

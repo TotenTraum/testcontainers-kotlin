@@ -53,10 +53,15 @@ public object Wait {
     public fun forListeningPort(vararg ports: Int): WaitStrategy = WaitStrategy { c ->
         val targets = ports.toList().ifEmpty { c.getExposedPorts() }
         for (port in targets) {
+            var inconclusive = 0
             pollUntil("port $port to listen") {
                 externalCheck(c.host, c.getMappedPort(port))
-                internalCheck(c, port)
-                true
+                when (val inside = internalCheck(c, port)) {
+                    InternalCheck.Listening, InternalCheck.NoShell -> true
+                    // A dying container fails its execs a moment before Docker reports it stopped; only an
+                    // error that persists while it keeps running means the check cannot work in this image.
+                    is InternalCheck.Inconclusive -> if (++inconclusive >= INCONCLUSIVE_LIMIT) true else throw inside.reason
+                }
             }
         }
     }
@@ -127,23 +132,39 @@ public object Wait {
         }
     }
 
-    private suspend fun internalCheck(c: GenericContainer, port: Int) {
+    private sealed interface InternalCheck {
+        data object Listening : InternalCheck
+        data object NoShell : InternalCheck
+        class Inconclusive(val reason: NotReadyException) : InternalCheck
+    }
+
+    private const val INCONCLUSIVE_LIMIT = 5
+
+    /**
+     * Whether [port] is bound inside the container. Ready only on positive evidence: a proxy in front of the
+     * container (Docker Desktop, a Compose ambassador) accepts connections even when nothing listens, or
+     * when the container is gone.
+     */
+    private suspend fun internalCheck(c: GenericContainer, port: Int): InternalCheck {
         val hex = port.toString(16).uppercase().padStart(4, '0')
         val result = try {
-            c.execInContainer("/bin/sh", "-c", "grep -qi ':$hex ' /proc/net/tcp /proc/net/tcp6")
+            // tcp6 may not exist; the pipeline's status is grep's: 0 found, 1 not found.
+            c.execInContainer("/bin/sh", "-c", "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ':$hex '")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // A stopped container cannot exec either, and a proxy in front of it (Docker Desktop, a Compose
-            // ambassador) still accepts connections: never call that ready.
             if (!isRunning(c)) throw NotReadyException("the container is not running", e)
-            return // image without a shell: rely on the external check only
+            return InternalCheck.Inconclusive(NotReadyException("cannot check the port inside the container: ${e.message}", e))
         }
-        // 0: listening; 1: not yet; anything else: shell/grep/proc unavailable, rely on the external check
-        if (result.exitCode == 1) {
-            throw NotReadyException("port $port accepts host connections, but nothing listens on it inside the container yet")
+        return when (result.exitCode) {
+            0 -> InternalCheck.Listening
+            1 -> throw NotReadyException("port $port accepts host connections, but nothing listens on it inside the container yet")
+            126, 127 -> InternalCheck.NoShell // no /bin/sh (distroless, scratch): rely on the external check
+            else -> {
+                if (!isRunning(c)) throw NotReadyException("the container is not running")
+                InternalCheck.Inconclusive(NotReadyException("port check inside the container exited with ${result.exitCode}"))
+            }
         }
-        if (result.exitCode != 0 && !isRunning(c)) throw NotReadyException("the container is not running")
     }
 
     private suspend fun isRunning(c: GenericContainer): Boolean {
